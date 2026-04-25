@@ -189,3 +189,54 @@ class NameCache:
         if session_id in self._data:
             del self._data[session_id]
             self._save()
+
+
+class Summarizer:
+    """Generates session names and summaries via claude CLI."""
+
+    DEFAULT_MODEL = "claude-haiku-4-5"
+    PROMPT_TEMPLATE = (
+        "Прочитай первые сообщения из сессии Claude Code и верни JSON:\n"
+        '{{"name": "название из 3-5 слов на русском", '
+        '"summary": "2-3 предложения о теме на русском"}}\n\n'
+        "Сообщения:\n{messages}\n\n"
+        "Верни ТОЛЬКО JSON без пояснений."
+    )
+    FALLBACK = {"name": "(без названия)", "summary": ""}
+
+    def __init__(self, model: str = None, timeout: int = 30):
+        self.model = model or self.DEFAULT_MODEL
+        self.timeout = timeout
+
+    def summarize(self, messages: list) -> dict:
+        truncated = [m[:300] for m in messages[:10]]
+        joined = "\n---\n".join(truncated)
+        prompt = self.PROMPT_TEMPLATE.format(messages=joined[:2000])
+
+        try:
+            proc = subprocess.run(
+                ["claude", "-p", "--model", self.model],
+                input=prompt,
+                capture_output=True,
+                text=True,
+                timeout=self.timeout,
+            )
+            if proc.returncode != 0:
+                return dict(self.FALLBACK)
+            return self._parse(proc.stdout)
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return dict(self.FALLBACK)
+
+    def _parse(self, output: str) -> dict:
+        try:
+            start = output.find("{")
+            end = output.rfind("}")
+            if start == -1 or end == -1:
+                return dict(self.FALLBACK)
+            data = json.loads(output[start:end + 1])
+            return {
+                "name": str(data.get("name", "(без названия)"))[:80],
+                "summary": str(data.get("summary", ""))[:500],
+            }
+        except (json.JSONDecodeError, ValueError):
+            return dict(self.FALLBACK)
