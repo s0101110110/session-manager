@@ -365,3 +365,40 @@ class Operations:
                     parts.append(m.get("text", ""))
             return "\n".join(parts)
         return ""
+
+
+class HealthCheck:
+    """Validates environment at startup. Returns a report with auto-fix suggestions."""
+
+    def __init__(self, claude_home: Path):
+        self.claude_home = Path(claude_home)
+
+    def run(self) -> dict:
+        report = {
+            "projects_dir_ok": False,
+            "claude_cli_ok": False,
+            "corrupted_count": 0,
+            "ghost_count": 0,
+            "issues": [],
+            "auto_fix": [],
+        }
+
+        projects = self.claude_home / "projects"
+        if projects.exists() and projects.is_dir():
+            report["projects_dir_ok"] = True
+        else:
+            report["issues"].append(f"Projects directory missing: {projects}")
+            report["auto_fix"].append(f"mkdir -p {projects}")
+
+        if shutil.which("claude") is not None:
+            report["claude_cli_ok"] = True
+        else:
+            report["issues"].append("claude CLI not found in PATH")
+            report["auto_fix"].append("Install Claude Code: https://docs.claude.com/claude-code")
+
+        store = SessionStore(self.claude_home)
+        sessions = store.list_sessions()
+        report["corrupted_count"] = sum(1 for s in sessions if s.is_corrupted)
+        report["ghost_count"] = sum(1 for s in sessions if s.is_ghost)
+
+        return report
