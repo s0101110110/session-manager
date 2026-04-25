@@ -142,3 +142,50 @@ class SessionStore:
                     yield sid, project_dirname, d.get("display", "")[:200]
                 except json.JSONDecodeError:
                     continue
+
+
+class NameCache:
+    """Persistent cache for session names and summaries."""
+
+    def __init__(self, cache_path: Path):
+        self.cache_path = Path(cache_path)
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self._data = self._load()
+
+    def _load(self) -> dict:
+        if not self.cache_path.exists():
+            return {}
+        try:
+            with open(self.cache_path) as f:
+                return json.load(f)
+        except (json.JSONDecodeError, OSError):
+            return {}
+
+    def _save(self) -> None:
+        tmp = self.cache_path.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
+            json.dump(self._data, f, ensure_ascii=False, indent=2)
+        tmp.replace(self.cache_path)
+
+    def set(self, session_id: str, name: str, summary: str, file_size: int) -> None:
+        self._data[session_id] = {
+            "name": name,
+            "summary": summary,
+            "file_size": file_size,
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        self._save()
+
+    def get(self, session_id: str) -> Optional[dict]:
+        return self._data.get(session_id)
+
+    def is_valid(self, session_id: str, current_size: int) -> bool:
+        entry = self._data.get(session_id)
+        if not entry:
+            return False
+        return entry.get("file_size") == current_size
+
+    def delete(self, session_id: str) -> None:
+        if session_id in self._data:
+            del self._data[session_id]
+            self._save()
