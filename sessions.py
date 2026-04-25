@@ -240,3 +240,128 @@ class Summarizer:
             }
         except (json.JSONDecodeError, ValueError):
             return dict(self.FALLBACK)
+
+
+class Operations:
+    """Atomic operations on sessions: delete, rename, move, export, continue."""
+
+    def __init__(self, store: "SessionStore", cache: "NameCache"):
+        self.store = store
+        self.cache = cache
+
+    def delete(self, session_id: str) -> None:
+        sessions = self.store.list_sessions()
+        target = next((s for s in sessions if s.id == session_id), None)
+        if target is None:
+            raise ValueError(f"Session not found: {session_id}")
+
+        if target.is_ghost:
+            self._remove_from_history(session_id)
+        else:
+            if target.file_path and target.file_path.exists():
+                target.file_path.unlink()
+
+        self.cache.delete(session_id)
+
+    def rename(self, session_id: str, new_name: str) -> None:
+        existing = self.cache.get(session_id) or {}
+        self.cache.set(
+            session_id,
+            name=new_name,
+            summary=existing.get("summary", ""),
+            file_size=existing.get("file_size", 0),
+        )
+
+    def move(self, session_id: str, target_project: str) -> None:
+        sessions = self.store.list_sessions()
+        target = next((s for s in sessions if s.id == session_id), None)
+        if target is None:
+            raise ValueError(f"Session not found: {session_id}")
+        if target.is_ghost:
+            raise ValueError(f"Cannot move ghost session: {session_id}")
+
+        target_dir = self.store.projects_dir / target_project
+        if not target_dir.exists() or not target_dir.is_dir():
+            raise FileNotFoundError(f"Target project does not exist: {target_project}")
+
+        src = target.file_path
+        dst = target_dir / src.name
+
+        if dst.exists():
+            raise FileExistsError(f"Target already has a session with this id: {dst}")
+
+        src.replace(dst)
+
+    def export(self, session_id: str, output_dir: Path) -> Path:
+        sessions = self.store.list_sessions()
+        target = next((s for s in sessions if s.id == session_id), None)
+        if target is None or target.is_ghost or target.file_path is None:
+            raise ValueError(f"Cannot export: {session_id}")
+
+        cached = self.cache.get(session_id)
+        name = (cached.get("name") if cached else None) or session_id[:8]
+        safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in name)[:60]
+
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        out = output_dir / f"{safe_name}.md"
+
+        with open(out, "w") as f_out:
+            f_out.write(f"# {name}\n\n")
+            f_out.write(f"**Session ID:** `{session_id}`\n\n---\n\n")
+            with open(target.file_path) as f_in:
+                for line in f_in:
+                    if not line.strip():
+                        continue
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    role = d.get("type", "?").upper()
+                    content = d.get("message", {}).get("content", "")
+                    text = self._extract_text(content)
+                    if text:
+                        f_out.write(f"### {role}\n\n{text}\n\n---\n\n")
+        return out
+
+    def continue_session(self, session_id: str) -> None:
+        sessions = self.store.list_sessions()
+        target = next((s for s in sessions if s.id == session_id), None)
+        if target is None:
+            raise ValueError(f"Session not found: {session_id}")
+        if target.is_ghost:
+            raise ValueError(f"Cannot resume ghost session: {session_id}")
+        os.execvp("claude", ["claude", "--resume", session_id])
+
+    def _remove_from_history(self, session_id: str) -> None:
+        history = self.store.history_file
+        if not history.exists():
+            return
+        kept = []
+        with open(history) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    d = json.loads(line)
+                    if d.get("sessionId") != session_id:
+                        kept.append(line.rstrip("\n"))
+                except json.JSONDecodeError:
+                    kept.append(line.rstrip("\n"))
+        tmp = history.with_suffix(".jsonl.tmp")
+        with open(tmp, "w") as f:
+            for line in kept:
+                f.write(line + "\n")
+        tmp.replace(history)
+
+    @staticmethod
+    def _extract_text(content) -> str:
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            parts = []
+            for m in content:
+                if isinstance(m, dict) and m.get("type") == "text":
+                    parts.append(m.get("text", ""))
+            return "\n".join(parts)
+        return ""
