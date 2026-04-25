@@ -402,3 +402,479 @@ class HealthCheck:
         report["ghost_count"] = sum(1 for s in sessions if s.is_ghost)
 
         return report
+
+
+# ── TUI (Textual) ────────────────────────────────────────────────────────────
+
+try:
+    from textual.app import App, ComposeResult
+    from textual.containers import Horizontal, Vertical
+    from textual.widgets import DataTable, Static, Footer, Header, Input, Label, Button
+    from textual.binding import Binding
+    from textual.screen import ModalScreen
+    TEXTUAL_AVAILABLE = True
+except ImportError:
+    TEXTUAL_AVAILABLE = False
+
+if TEXTUAL_AVAILABLE:
+
+    class ConfirmDeleteScreen(ModalScreen):
+        CSS = "ConfirmDeleteScreen { align: center middle; } Vertical { background: $surface; border: solid $primary; padding: 1 2; width: 50; height: auto; } Horizontal { height: 3; align: center middle; } Button { margin: 0 1; }"
+
+        def __init__(self, session_id: str, name: str):
+            super().__init__()
+            self.session_id = session_id
+            self.session_name = name
+
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield Label(f"Удалить сессию:\n{self.session_name}?")
+                with Horizontal():
+                    yield Button("Удалить", variant="error", id="confirm")
+                    yield Button("Отмена", id="cancel")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            self.dismiss(event.button.id == "confirm")
+
+    class RenameScreen(ModalScreen):
+        CSS = "RenameScreen { align: center middle; } Vertical { background: $surface; border: solid $primary; padding: 1 2; width: 60; height: auto; } Horizontal { height: 3; align: center middle; } Button { margin: 0 1; }"
+
+        def __init__(self, session_id: str, current_name: str):
+            super().__init__()
+            self.session_id = session_id
+            self.current_name = current_name
+
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield Label("Новое название:")
+                yield Input(value=self.current_name, id="new-name")
+                with Horizontal():
+                    yield Button("Сохранить", variant="primary", id="save")
+                    yield Button("Отмена", id="cancel")
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "save":
+                self.dismiss(self.query_one("#new-name", Input).value)
+            else:
+                self.dismiss(None)
+
+    class MoveScreen(ModalScreen):
+        CSS = "MoveScreen { align: center middle; } Vertical { background: $surface; border: solid $primary; padding: 1 2; width: 50; height: auto; } Horizontal { height: 3; align: center middle; } Button { margin: 0 1; }"
+
+        def __init__(self, session_id: str, projects: list, current_project: str):
+            super().__init__()
+            self.session_id = session_id
+            self.projects = projects
+            self.current_project = current_project
+
+        def compose(self) -> ComposeResult:
+            with Vertical():
+                yield Label("Переместить в проект:")
+                yield DataTable(id="projects-table")
+                with Horizontal():
+                    yield Button("Переместить", variant="primary", id="move")
+                    yield Button("Отмена", id="cancel")
+
+        def on_mount(self) -> None:
+            table = self.query_one("#projects-table", DataTable)
+            table.add_columns("Проект")
+            table.cursor_type = "row"
+            for p in self.projects:
+                marker = " (текущий)" if p == self.current_project else ""
+                table.add_row(p + marker, key=p)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "move":
+                table = self.query_one("#projects-table", DataTable)
+                if table.cursor_coordinate:
+                    cell_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+                    self.dismiss(cell_key.row_key.value)
+                else:
+                    self.dismiss(None)
+            else:
+                self.dismiss(None)
+
+    class TUIApp(App):
+        """Session Manager TUI."""
+
+        CSS = """
+        #list-panel { width: 50%; border: solid $primary; }
+        #preview-panel { width: 50%; border: solid $secondary; padding: 1; }
+        #sessions-table { height: 1fr; }
+        #preview-content { height: 1fr; }
+        #search { dock: top; }
+        """
+
+        BINDINGS = [
+            Binding("q", "quit", "Quit"),
+            Binding("delete", "delete_session", "Delete"),
+            Binding("r", "rename_session", "Rename"),
+            Binding("m", "move_session", "Move"),
+            Binding("e", "export_session", "Export"),
+            Binding("c", "continue_session_action", "Continue"),
+            Binding("u", "refresh_summary", "Refresh summary"),
+            Binding("slash", "focus_search", "Search"),
+        ]
+
+        def __init__(self, store, cache, summarizer, ops, logger):
+            super().__init__()
+            self.store = store
+            self.cache = cache
+            self.summarizer = summarizer
+            self.ops = ops
+            self.logger = logger
+            self.sessions = []
+            self._search_query = ""
+
+        def compose(self) -> ComposeResult:
+            yield Header(show_clock=True)
+            with Horizontal():
+                with Vertical(id="list-panel"):
+                    yield Input(placeholder="/ поиск...", id="search")
+                    yield DataTable(id="sessions-table")
+                with Vertical(id="preview-panel"):
+                    yield Static("Выберите сессию для просмотра", id="preview-content")
+            yield Footer()
+
+        def on_mount(self) -> None:
+            table = self.query_one("#sessions-table", DataTable)
+            table.add_columns("Название", "Дата", "Сбщ", "Размер")
+            table.cursor_type = "row"
+            self.refresh_sessions()
+            self.run_worker(self._generate_missing_summaries, thread=True)
+
+        def _generate_missing_summaries(self) -> None:
+            for session in list(self.sessions):
+                if session.is_ghost or session.is_corrupted:
+                    continue
+                if self.cache.is_valid(session.id, session.size_bytes):
+                    continue
+                try:
+                    messages = self._read_first_messages(session.file_path, limit=10)
+                    if not messages:
+                        continue
+                    result = self.summarizer.summarize(messages)
+                    self.cache.set(
+                        session.id,
+                        name=result["name"],
+                        summary=result["summary"],
+                        file_size=session.size_bytes,
+                    )
+                    self.call_from_thread(self.refresh_sessions)
+                except Exception as e:
+                    self.logger.error(f"summary failed for {session.id}: {e}")
+
+        def _read_first_messages(self, path: Path, limit: int = 10) -> list:
+            messages = []
+            try:
+                with open(path) as f:
+                    for line in f:
+                        if not line.strip():
+                            continue
+                        try:
+                            d = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        if d.get("type") != "user":
+                            continue
+                        content = d.get("message", {}).get("content", "")
+                        text = Operations._extract_text(content)
+                        if text:
+                            messages.append(text[:300])
+                        if len(messages) >= limit:
+                            break
+            except OSError:
+                pass
+            return messages
+
+        def refresh_sessions(self, search_query: str = None) -> None:
+            if search_query is not None:
+                self._search_query = search_query.lower()
+
+            all_sessions = self.store.list_sessions()
+            all_sessions.sort(key=lambda s: s.last_modified, reverse=True)
+
+            if self._search_query:
+                filtered = []
+                for s in all_sessions:
+                    cached = self.cache.get(s.id) or {}
+                    haystack = " ".join([
+                        s.first_message,
+                        s.id,
+                        cached.get("name", ""),
+                        cached.get("summary", ""),
+                    ]).lower()
+                    if self._search_query in haystack:
+                        filtered.append(s)
+                    elif s.file_path and s.file_path.exists():
+                        try:
+                            if self._search_query in s.file_path.read_text(errors="ignore").lower():
+                                filtered.append(s)
+                        except OSError:
+                            pass
+                self.sessions = filtered
+            else:
+                self.sessions = all_sessions
+
+            table = self.query_one("#sessions-table", DataTable)
+            table.clear()
+            for s in self.sessions:
+                cached = self.cache.get(s.id)
+                name = (cached or {}).get("name") or s.first_message[:40] or s.id[:8]
+                if s.is_ghost:
+                    name = f"👻 {name}"
+                elif s.is_corrupted:
+                    name = f"⚠ {name}"
+                date_str = (
+                    datetime.fromtimestamp(s.last_modified).strftime("%Y-%m-%d %H:%M")
+                    if s.last_modified else "—"
+                )
+                size_str = f"{s.size_bytes // 1024}K" if s.size_bytes else "—"
+                table.add_row(name, date_str, str(s.message_count), size_str, key=s.id)
+
+        def on_input_changed(self, event: "Input.Changed") -> None:
+            if event.input.id == "search":
+                self.refresh_sessions(search_query=event.value)
+
+        def on_data_table_row_highlighted(self, event: "DataTable.RowHighlighted") -> None:
+            if event.row_key is None:
+                return
+            sid = event.row_key.value
+            session = next((s for s in self.sessions if s.id == sid), None)
+            if not session:
+                return
+            cached = self.cache.get(sid) or {}
+            preview = self.query_one("#preview-content", Static)
+            date_str = (
+                datetime.fromtimestamp(session.last_modified).strftime("%Y-%m-%d %H:%M")
+                if session.last_modified else "—"
+            )
+            text = (
+                f"📅 {date_str}\n"
+                f"💬 {session.message_count} сообщений   "
+                f"📦 {session.size_bytes // 1024}K\n"
+                f"📁 {session.project}\n\n"
+                f"{cached.get('summary') or session.first_message or '(нет данных)'}"
+            )
+            preview.update(text)
+
+        def _selected_session(self):
+            table = self.query_one("#sessions-table", DataTable)
+            if table.cursor_coordinate is None:
+                return None
+            try:
+                row_key = table.coordinate_to_cell_key(table.cursor_coordinate).row_key
+                return next((s for s in self.sessions if s.id == row_key.value), None)
+            except Exception:
+                return None
+
+        def action_delete_session(self) -> None:
+            session = self._selected_session()
+            if not session:
+                return
+            cached = self.cache.get(session.id) or {}
+            name = cached.get("name") or session.first_message[:40] or session.id[:8]
+
+            def after_confirm(confirmed: bool) -> None:
+                if confirmed:
+                    try:
+                        self.ops.delete(session.id)
+                        self.refresh_sessions()
+                    except Exception as e:
+                        self.logger.error(f"delete failed: {e}")
+                        self.notify(f"Ошибка: {e}", severity="error")
+
+            self.push_screen(ConfirmDeleteScreen(session.id, name), after_confirm)
+
+        def action_rename_session(self) -> None:
+            session = self._selected_session()
+            if not session:
+                return
+            cached = self.cache.get(session.id) or {}
+            current = cached.get("name") or ""
+
+            def after_rename(new_name) -> None:
+                if new_name and new_name.strip():
+                    self.ops.rename(session.id, new_name.strip())
+                    self.refresh_sessions()
+
+            self.push_screen(RenameScreen(session.id, current), after_rename)
+
+        def action_move_session(self) -> None:
+            session = self._selected_session()
+            if not session or session.is_ghost:
+                self.notify("Невозможно переместить ghost-сессию", severity="warning")
+                return
+
+            projects = [p.name for p in self.store.projects_dir.iterdir() if p.is_dir()]
+
+            def after_move(target) -> None:
+                if target and target != session.project:
+                    try:
+                        self.ops.move(session.id, target)
+                        self.refresh_sessions()
+                    except Exception as e:
+                        self.logger.error(f"move failed: {e}")
+                        self.notify(f"Ошибка: {e}", severity="error")
+
+            self.push_screen(MoveScreen(session.id, projects, session.project), after_move)
+
+        def action_export_session(self) -> None:
+            session = self._selected_session()
+            if not session or session.is_ghost or session.is_corrupted:
+                self.notify("Невозможно экспортировать", severity="warning")
+                return
+            try:
+                out = self.ops.export(session.id, Path.home() / "Downloads")
+                self.notify(f"Экспортировано: {out.name}")
+            except Exception as e:
+                self.logger.error(f"export failed: {e}")
+                self.notify(f"Ошибка: {e}", severity="error")
+
+        def action_continue_session_action(self) -> None:
+            session = self._selected_session()
+            if not session or session.is_ghost:
+                self.notify("Невозможно продолжить", severity="warning")
+                return
+            self.exit()
+            self.ops.continue_session(session.id)
+
+        def action_focus_search(self) -> None:
+            self.query_one("#search", Input).focus()
+
+        def action_refresh_summary(self) -> None:
+            session = self._selected_session()
+            if not session or session.is_ghost or session.is_corrupted:
+                return
+            self.cache.delete(session.id)
+            self.notify("Кэш очищен — резюме перегенерируется в фоне")
+            self.run_worker(self._generate_missing_summaries, thread=True)
+
+
+# ── CLI helpers ───────────────────────────────────────────────────────────────
+
+def _resolve_paths():
+    home = Path.home() / ".claude"
+    cache_path = home / "session-backups" / "names.json"
+    log_path = home / "session-backups" / "sessions.log"
+    return home, cache_path, log_path
+
+
+def cmd_list(store, cache):
+    sessions = store.list_sessions()
+    sessions.sort(key=lambda s: s.last_modified, reverse=True)
+    print(f"{'ID':<10} {'Тип':<6} {'Проект':<35} Название")
+    print("-" * 85)
+    for s in sessions:
+        cached = cache.get(s.id) or {}
+        name = cached.get("name") or s.first_message[:40] or "(пусто)"
+        kind = "GHOST" if s.is_ghost else "BAD" if s.is_corrupted else "OK"
+        print(f"{s.id[:8]:<10} {kind:<6} {s.project[:35]:<35} {name[:40]}")
+
+
+def cmd_delete(store, cache, session_id):
+    ops = Operations(store, cache)
+    matches = [s for s in store.list_sessions() if s.id.startswith(session_id)]
+    if not matches:
+        print(f"Сессия не найдена: {session_id}")
+        return 1
+    if len(matches) > 1:
+        print(f"Несколько совпадений ({len(matches)}), уточните ID")
+        return 1
+    ops.delete(matches[0].id)
+    print(f"Удалено: {matches[0].id}")
+    return 0
+
+
+def cmd_rename(store, cache, session_id, name):
+    ops = Operations(store, cache)
+    matches = [s for s in store.list_sessions() if s.id.startswith(session_id)]
+    if not matches:
+        print(f"Сессия не найдена: {session_id}")
+        return 1
+    ops.rename(matches[0].id, name)
+    print(f"Переименовано: {matches[0].id} → {name}")
+    return 0
+
+
+def cmd_test():
+    """Self-test mode: verify SessionStore and Operations on temp data."""
+    import tempfile
+    print("Запуск самопроверки...")
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / ".claude"
+        projects = home / "projects" / "-test-project"
+        projects.mkdir(parents=True)
+        sample = projects / "test1234-0000-0000-0000-000000000000.jsonl"
+        sample.write_text(json.dumps({"type": "user", "message": {"content": "test"}}) + "\n")
+        (home / "history.jsonl").touch()
+
+        store = SessionStore(home)
+        cache = NameCache(home / "session-backups" / "names.json")
+        ops = Operations(store, cache)
+
+        sessions = store.list_sessions()
+        assert len(sessions) >= 1, "list_sessions failed"
+
+        cache.set("test1234-0000-0000-0000-000000000000", name="X", summary="Y", file_size=10)
+        assert cache.get("test1234-0000-0000-0000-000000000000") is not None
+
+        ops.rename("test1234-0000-0000-0000-000000000000", "renamed")
+        assert cache.get("test1234-0000-0000-0000-000000000000")["name"] == "renamed"
+
+        ops.delete("test1234-0000-0000-0000-000000000000")
+        assert not sample.exists(), "delete failed"
+
+    print("✓ все тесты прошли")
+    return 0
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Claude Code session manager")
+    parser.add_argument("command", nargs="?", default="tui",
+                        choices=["tui", "list", "delete", "rename", "health", "test"])
+    parser.add_argument("session_id", nargs="?")
+    parser.add_argument("name", nargs="?")
+    parser.add_argument("--debug", action="store_true")
+    args = parser.parse_args()
+
+    if args.command == "test":
+        return cmd_test()
+
+    home, cache_path, log_path = _resolve_paths()
+    logger = Logger(log_path, debug=args.debug)
+    store = SessionStore(home)
+    cache = NameCache(cache_path)
+
+    if args.command == "list":
+        cmd_list(store, cache)
+        return 0
+    if args.command == "delete":
+        if not args.session_id:
+            print("Укажите ID сессии")
+            return 1
+        return cmd_delete(store, cache, args.session_id)
+    if args.command == "rename":
+        if not args.session_id or not args.name:
+            print("Укажите ID и новое название")
+            return 1
+        return cmd_rename(store, cache, args.session_id, args.name)
+    if args.command == "health":
+        report = HealthCheck(home).run()
+        for k, v in report.items():
+            print(f"  {k}: {v}")
+        return 0
+
+    if not TEXTUAL_AVAILABLE:
+        print("Textual не установлен. Запустите: pip3 install textual")
+        return 1
+
+    summarizer = Summarizer()
+    ops = Operations(store, cache)
+    app = TUIApp(store, cache, summarizer, ops, logger)
+    app.run()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
