@@ -67,6 +67,8 @@ class SessionStore:
                     continue
                 for jsonl_file in project_dir.glob("*.jsonl"):
                     s = self._read_session(jsonl_file, project_dir.name)
+                    if s.first_message.startswith("Прочитай первые сообщения из сессии Claude Code"):
+                        continue
                     sessions.append(s)
                     seen_ids.add(s.id)
 
@@ -215,7 +217,7 @@ class Summarizer:
 
         try:
             proc = subprocess.run(
-                ["claude", "-p", "--model", self.model],
+                ["claude", "-p", "--no-session-persistence", "--model", self.model],
                 input=prompt,
                 capture_output=True,
                 text=True,
