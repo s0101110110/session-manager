@@ -11,8 +11,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ "${1:-}" == "--vps" ]]; then
     TARGET="${2:?VPS target required, e.g. claude@1.2.3.4}"
     echo "Deploying to VPS: $TARGET"
-    ssh "$TARGET" "mkdir -p ~/.claude/skills ~/.claude/scripts"
-    scp "$SCRIPT_DIR/sessions.md" "$TARGET":~/.claude/skills/
+    ssh "$TARGET" "mkdir -p ~/.claude/skills/sessions ~/.claude/scripts"
+    scp "$SCRIPT_DIR/sessions.md" "$TARGET":~/.claude/skills/sessions/SKILL.md
     scp "$SCRIPT_DIR/sessions.py" "$TARGET":~/.claude/scripts/
     ssh "$TARGET" "python3 -c 'import textual' 2>/dev/null || pip3 install --user textual --quiet && echo '✓ textual OK'"
     echo "✓ Deployed to $TARGET"
@@ -20,8 +20,8 @@ if [[ "${1:-}" == "--vps" ]]; then
 fi
 
 echo "Installing locally to ~/.claude/"
-mkdir -p ~/.claude/skills ~/.claude/scripts
-cp "$SCRIPT_DIR/sessions.md" ~/.claude/skills/
+mkdir -p ~/.claude/skills/sessions ~/.claude/scripts
+cp "$SCRIPT_DIR/sessions.md" ~/.claude/skills/sessions/SKILL.md
 cp "$SCRIPT_DIR/sessions.py" ~/.claude/scripts/
 
 if ! python3 -c "import textual" 2>/dev/null; then
@@ -41,7 +41,7 @@ fi
 
 echo ""
 echo "✓ Установлено:"
-echo "  ~/.claude/skills/sessions.md"
+echo "  ~/.claude/skills/sessions/SKILL.md"
 echo "  ~/.claude/scripts/sessions.py"
 echo ""
-echo "Запусти /sessions в Claude Code."
+echo "Скажи Claude: 'покажи мои сессии' или 'sessions'"
