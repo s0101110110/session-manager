@@ -1,6 +1,6 @@
 ---
 name: sessions
-description: Manage Claude Code sessions — list, search, delete, rename, move, export, and continue past sessions. Use when the user wants to see, organize, or clean up their Claude Code sessions, or asks "/sessions".
+description: Manage Claude Code sessions — list, search, delete, rename, move, export, and continue past sessions. Use when the user says "sessions", "покажи сессии", "удали сессии", "найди сессию", "manage sessions", or wants to organize/clean up their Claude Code sessions.
 ---
 
 # Session Manager
@@ -9,8 +9,7 @@ description: Manage Claude Code sessions — list, search, delete, rename, move,
 
 ## Когда использовать
 
-- Пользователь пишет `/sessions`
-- Пользователь говорит "покажи мои сессии", "удали старые сессии", "найди сессию про X"
+- Пользователь говорит "sessions", "покажи мои сессии", "удали старые сессии", "найди сессию про X"
 - Пользователь хочет вернуться к предыдущему разговору
 
 ## Перед запуском — проверка зависимостей
@@ -35,7 +34,7 @@ python3 ~/.claude/scripts/sessions.py
 Управление в TUI:
 - `↑↓` — навигация
 - `/` — поиск
-- `Del` — удалить
+- `d` — удалить
 - `r` — переименовать
 - `m` — переместить в другой проект
 - `e` — экспортировать в Markdown

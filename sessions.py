@@ -509,7 +509,7 @@ if TEXTUAL_AVAILABLE:
 
         BINDINGS = [
             Binding("q", "quit", "Quit"),
-            Binding("delete", "delete_session", "Delete"),
+            Binding("d", "delete_session", "Delete"),
             Binding("r", "rename_session", "Rename"),
             Binding("m", "move_session", "Move"),
             Binding("e", "export_session", "Export"),
